@@ -3516,7 +3516,8 @@ export function basetenModelManagerOptions(
 						const isBasetenNativeReasoning =
 							defaults.id === "openai/gpt-oss-120b" ||
 							defaults.id === "deepseek-ai/DeepSeek-V4-Pro" ||
-							defaults.id === "zai-org/GLM-5.2";
+							defaults.id === "zai-org/GLM-5.2" ||
+							defaults.id === "zai-org/GLM-5.2-Fast";
 						const reasoning =
 							isBasetenNativeReasoning &&
 							(features.includes("reasoning") || features.includes("reasoning_effort"));
@@ -3544,7 +3545,10 @@ export function basetenModelManagerOptions(
 
 						// Baseten's reasoning router accepts only the high/max
 						// effort tiers for its GLM-5.2 and gpt-oss routes.
-						const isEffortReasoning = defaults.id === "openai/gpt-oss-120b" || defaults.id === "zai-org/GLM-5.2";
+						const isEffortReasoning =
+							defaults.id === "openai/gpt-oss-120b" ||
+							defaults.id === "zai-org/GLM-5.2" ||
+							defaults.id === "zai-org/GLM-5.2-Fast";
 						const thinking = isEffortReasoning
 							? {
 									mode: "effort" as const,
