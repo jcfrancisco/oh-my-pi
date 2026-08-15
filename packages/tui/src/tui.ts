@@ -414,11 +414,9 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 }
 
 /**
- * Detect sessions where ED3 cannot safely rebuild scrollback. A direct HerdR
- * pane is deliberately excluded: HerdR's Ghostty core implements ED3, so the
- * source-owned replay used by direct terminals is both supported and the only
- * way to avoid hardening host-reflowed soft wraps. Nested multiplexers remain
- * unsafe because the inner tmux/screen/Zellij layer still owns its history.
+ * Detect sessions where ED3 cannot safely rebuild scrollback. Direct HerdR
+ * panes support explicit clears; nested multiplexers remain unsafe because the
+ * inner tmux/screen/Zellij layer owns their history.
  */
 function isMultiplexerSession(): boolean {
 	if (!isInsideTerminalMultiplexer()) return false;
@@ -457,12 +455,12 @@ function reportsSizeOnAltScreenToggle(): boolean {
 
 /**
  * Resize should repaint the visible window in place — no alternate-screen
- * borrow, no ED3 scrollback rewrap — for multiplexer panes and for terminals
- * that loop on alt-screen toggles. The tradeoff is identical to a multiplexer:
- * scrollback above the window keeps its old wrap instead of being re-flowed.
+ * borrow, no ED3 scrollback rewrap — for multiplexer and direct HerdR panes,
+ * plus terminals that loop on alt-screen toggles. Direct HerdR remains a
+ * direct terminal for explicit transcript replacement and display reset.
  */
 function resizeRepaintsInPlace(): boolean {
-	return isMultiplexerSession() || reportsSizeOnAltScreenToggle();
+	return isMultiplexerSession() || Bun.env.HERDR_ENV === "1" || reportsSizeOnAltScreenToggle();
 }
 
 /**

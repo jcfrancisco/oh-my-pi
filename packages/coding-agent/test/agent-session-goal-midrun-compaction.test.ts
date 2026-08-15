@@ -44,6 +44,18 @@ function highUsage(input: number) {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
+// These tests await real cross-pipeline concurrency signals; fake timers cannot
+// drive those queues. Keep a failure-only watchdog, and cancel it as soon as
+// the signal wins so successful cases never leave a wall-clock delay behind.
+async function raceWithTimeout<T, F>(promise: Promise<T>, timeoutMs: number, timeoutValue: F): Promise<T | F> {
+	const timeout = Promise.withResolvers<F>();
+	const timer = setTimeout(() => timeout.resolve(timeoutValue), timeoutMs);
+	try {
+		return await Promise.race([promise, timeout.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 describe("AgentSession mid-run threshold compaction", () => {
 	let tempDir: TempDir;
@@ -252,22 +264,25 @@ describe("AgentSession mid-run threshold compaction", () => {
 		const compactSpy = mockCompaction("SHOULD-NOT-RUN");
 
 		const prompt = session.prompt("work below the maintenance threshold");
-		const messageEndOutcome = await Promise.race([
+		const messageEndOutcome = await raceWithTimeout(
 			messageEndEntered.promise.then(() => "entered" as const),
-			Bun.sleep(2_000).then(() => "blocked" as const),
-		]);
+			2_000,
+			"blocked" as const,
+		);
 		const providerOutcome =
 			messageEndOutcome === "entered"
-				? await Promise.race([
+				? await raceWithTimeout(
 						nextProviderCall.promise.then(() => "dispatched" as const),
-						Bun.sleep(2_000).then(() => "blocked" as const),
-					])
+						2_000,
+						"blocked" as const,
+					)
 				: "blocked";
 		releaseMessageEnd.resolve();
-		const promptOutcome = await Promise.race([
+		const promptOutcome = await raceWithTimeout(
 			prompt.then(() => "settled" as const),
-			Bun.sleep(2_000).then(() => "blocked" as const),
-		]);
+			2_000,
+			"blocked" as const,
+		);
 
 		expect(messageEndOutcome).toBe("entered");
 		expect(providerOutcome).toBe("dispatched");
@@ -343,27 +358,31 @@ describe("AgentSession mid-run threshold compaction", () => {
 		);
 
 		const prompt = session.prompt("keep notification mutations out of live context");
-		const toolResultHookOutcome = await Promise.race([
+		const toolResultHookOutcome = await raceWithTimeout(
 			toolResultHookEntered.promise.then(() => "entered" as const),
-			Bun.sleep(2_000).then(() => "blocked" as const),
-		]);
+			2_000,
+			"blocked" as const,
+		);
 		const secondModelCallOutcome =
 			toolResultHookOutcome === "entered"
-				? await Promise.race([
+				? await raceWithTimeout(
 						secondModelCallEntered.promise.then(() => "dispatched" as const),
-						Bun.sleep(2_000).then(() => "blocked" as const),
-					])
+						2_000,
+						"blocked" as const,
+					)
 				: "blocked";
 		releaseMutation.resolve();
-		const mutationOutcome = await Promise.race([
+		const mutationOutcome = await raceWithTimeout(
 			mutationApplied.promise.then(() => "applied" as const),
-			Bun.sleep(2_000).then(() => "blocked" as const),
-		]);
+			2_000,
+			"blocked" as const,
+		);
 		releaseSecondModelCall.resolve();
-		const promptOutcome = await Promise.race([
+		const promptOutcome = await raceWithTimeout(
 			prompt.then(() => "settled" as const),
-			Bun.sleep(2_000).then(() => "blocked" as const),
-		]);
+			2_000,
+			"blocked" as const,
+		);
 
 		expect(toolResultHookOutcome).toBe("entered");
 		expect(secondModelCallOutcome).toBe("dispatched");

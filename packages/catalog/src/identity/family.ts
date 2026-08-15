@@ -251,6 +251,25 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
 	return semverGte(glm.version, "5.2");
 });
 
+/**
+ * GLM-5.3+ coding SKUs. Unlike GLM-5.2 (whose reasoning_effort dialect is
+ * host-specific), GLM-5.3+ exposes a uniform wire-exact `low`/`high`/`max`
+ * ladder on every host, and thinking can no longer be disabled —
+ * `thinking.type` must always be `enabled`. Matching the family keeps future
+ * bumps (`glm-5.4`, `glm-6`, …) covered while excluding the vision (`…v`)
+ * shape and the non-reasoning `-flash`/`-flashx`/`-preview` variants.
+ */
+export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm || glm.vision) {
+		return false;
+	}
+	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+		return false;
+	}
+	return semverGte(glm.version, "5.3");
+});
+
 /** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
 	return parseGlmModel(bareModelId(modelId))?.vision === true;

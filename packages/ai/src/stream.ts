@@ -189,6 +189,7 @@ let providerInFlightHeartbeatWriterOverride:
 	| ((writeProviderInFlightInfo: () => Promise<void>) => Promise<void>)
 	| undefined;
 let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>) | undefined;
+let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -489,6 +490,7 @@ function waitForProviderInFlightSignal(provider: string, signal?: AbortSignal): 
 	if (signal?.aborted)
 		return Promise.reject(signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch"));
 	const signalPath = providerInFlightSignalPath(provider);
+	providerInFlightWaitObserverOverride?.(provider);
 	const waitStarted = Date.now();
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	let settled = false;
@@ -614,6 +616,9 @@ export const __providerInFlightForTesting = {
 	},
 	setLeaseRemover(remover: ((leasePath: string) => Promise<void>) | undefined): void {
 		providerInFlightLeaseRemoverOverride = remover;
+	},
+	setWaitObserver(observer: ((provider: string) => void) | undefined): void {
+		providerInFlightWaitObserverOverride = observer;
 	},
 	providerDir(provider: string): string {
 		return providerInFlightDir(provider);

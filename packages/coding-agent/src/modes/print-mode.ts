@@ -118,6 +118,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	}
 	// Set up extensions for print mode (no UI, no command context)
 	await initializeExtensions(session, {
+		mode: mode === "json" ? "json" : "print",
 		reportSendError: (action, err) => {
 			process.stderr.write(
 				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,

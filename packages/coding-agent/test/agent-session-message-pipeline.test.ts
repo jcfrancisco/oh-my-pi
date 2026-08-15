@@ -199,7 +199,7 @@ describe("AgentSession message pipeline", () => {
 			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 			"base64",
 		);
-		const webpData = Buffer.from(await new Bun.Image(seed).resize(200, 200).webp({ quality: 90 }).bytes()).toBase64();
+		const webpData = Buffer.from(await new Bun.Image(seed).resize(2, 2).webp({ quality: 90 }).bytes()).toBase64();
 		const historicalImage: ImageContent = {
 			type: "image",
 			data: webpData,

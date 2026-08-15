@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Recovered dangling range separators in hunk headers (`PUT 244.=:`, `CUT 5.=`) as single-line ranges (`N.=N`) instead of rejecting the header as an orphan payload line.
+
 ## [17.3.0] - 2026-08-13
 
 ### Fixed
