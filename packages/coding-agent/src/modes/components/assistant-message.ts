@@ -47,15 +47,6 @@ function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean)
 }
 
 /**
- * Whether `text` contains a ` ```mermaid ` fence (open or closed) outside
- * ordinary code fences. Mermaid defers native-scrollback settling wholesale
- * (see {@link AssistantMessageComponent.getTranscriptBlockSettledRows}): its
- * ASCII rendering resolves asynchronously, so even a completed fence can
- * re-layout rows that already looked settled. Fence-aware so a mermaid
- * example inside a regular code block never triggers the deferral.
- */
-
-/**
  * Frames for the streaming "thinking" pulse rendered in place of a hidden
  * thinking block while the model is still producing it. A single fixed-width
  * starburst cycles through facets (✻ ✼ ❉ ❊ ✺ ✹ ✸ ✶) so the indicator animates
@@ -150,12 +141,14 @@ function lerpHex(from: string, to: string, t: number): string {
 }
 
 /**
- * Component that renders a complete assistant message
+ * Renders an assistant message; streaming content remains mutable until the
+ * provider finalizes it because later deltas can revise earlier Markdown.
  */
 export class AssistantMessageComponent extends Container {
 	#contentContainer: Container;
 	#markerSlot: Container;
 	#lastMessage?: AssistantMessage;
+	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
 	#convertedKittyImages = new Map<string, ImageContent>();
 	#showImages = true;
@@ -239,14 +232,15 @@ export class AssistantMessageComponent extends Container {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
 
-		// Slim cache-invalidation divider, populated above the content when this
-		// turn's request lost the prompt cache (see setCacheInvalidation).
-		this.#markerSlot = new Container();
-		this.addChild(this.#markerSlot);
-
-		// Container for text/thinking content
+		// Container for text/thinking content.
 		this.#contentContainer = new Container();
 		this.addChild(this.#contentContainer);
+
+		// Cache-miss usage arrives only at message end. Keep its divider after
+		// streamed content so rows already emitted to native history remain a
+		// prefix of this append-only block.
+		this.#markerSlot = new Container();
+		this.addChild(this.#markerSlot);
 
 		if (message) {
 			this.updateContent(message);
@@ -254,10 +248,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Show or clear the slim cache-invalidation divider above this turn. Set at
-	 * `message_end` (live) or during rebuild, once the turn's usage is known and
-	 * compared against the previous turn's cache footprint. Bumps the transcript
-	 * block version so the change repaints even after content finalized.
+	 * Show or clear the trailing cache-invalidation divider. Set at `message_end`
+	 * (live) or during rebuild, once the turn's usage is known and compared
+	 * against the previous turn's cache footprint.
 	 */
 	setCacheInvalidation(info: CacheInvalidation | undefined): void {
 		this.#markerSlot.clear();
@@ -409,6 +402,12 @@ export class AssistantMessageComponent extends Container {
 
 	isTranscriptBlockFinalized(): boolean {
 		return this.#transcriptBlockFinalized;
+	}
+
+	/** Render completed prose rather than an earlier thinking row under emergency viewport pressure. */
+	renderTranscriptBlockEmergencyRow(width: number): string | undefined {
+		if (!this.#transcriptBlockFinalized) return undefined;
+		return this.#emergencyText?.render(width)[0];
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -750,6 +749,7 @@ export class AssistantMessageComponent extends Container {
 
 		// Clear content container
 		this.#contentContainer.clear();
+		this.#emergencyText = undefined;
 		this.#thinkingDots = undefined;
 		this.#hasTruncatableError = false;
 
@@ -779,6 +779,7 @@ export class AssistantMessageComponent extends Container {
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
 				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
+				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {

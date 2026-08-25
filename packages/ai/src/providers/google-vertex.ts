@@ -108,7 +108,7 @@ function resolveApiKey(options?: GoogleVertexOptions): string | undefined {
 	return realKey || $env.GOOGLE_CLOUD_API_KEY;
 }
 
-function resolveProject(options?: GoogleVertexOptions): string {
+export function resolveProject(options?: GoogleVertexOptions): string {
 	const project = options?.project || $env.GOOGLE_CLOUD_PROJECT || $env.GCP_PROJECT || $env.GCLOUD_PROJECT;
 	if (!project) {
 		throw new AIError.ConfigurationError(
@@ -121,10 +121,12 @@ function resolveProject(options?: GoogleVertexOptions): string {
 function resolveAmbientLocation(): string | undefined {
 	return $env.GOOGLE_VERTEX_LOCATION || $env.GOOGLE_CLOUD_LOCATION || $env.VERTEX_LOCATION || undefined;
 }
+
 function resolveOptionalLocation(options?: GoogleVertexOptions): string | undefined {
 	return options?.location || resolveAmbientLocation();
 }
-function resolveLocation(options?: GoogleVertexOptions): string {
+
+export function resolveLocation(options?: GoogleVertexOptions): string {
 	const location = resolveOptionalLocation(options);
 	if (!location) {
 		throw new AIError.ConfigurationError(

@@ -1,14 +1,16 @@
 /**
  * Google Gemini Web Search Provider
  *
- * Uses Gemini's Google Search grounding via Cloud Code Assist API.
- * Auth is resolved through `AuthStorage.getOAuthAccess(...)` for both
- * `google-gemini-cli` (stable prod) and `google-antigravity` (daily sandbox)
- * — the broker is the sole refresh authority, so this module never opens a
- * sibling SQLite store and never POSTs the broker sentinel to a Google token
- * endpoint.
+ * Uses Gemini's Google Search grounding through Cloud Code Assist for OAuth,
+ * the Developer API for API keys, and Vertex AI for ADC.
  */
+
+import * as os from "node:os";
+import * as path from "node:path";
 import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { getVertexAccessToken } from "@oh-my-pi/pi-ai/providers/google-auth";
+import { resolveLocation, resolveProject } from "@oh-my-pi/pi-ai/providers/google-vertex";
+import { resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -149,6 +151,29 @@ export async function findGeminiAuth(
 
 function hasGeminiOAuth(authStorage: AuthStorage): boolean {
 	return GEMINI_PROVIDERS.some((provider: GeminiProviderId) => authStorage.hasOAuth(provider));
+}
+
+/**
+ * Probe for Vertex AI Application Default Credentials. True only when a
+ * credential source AND a project AND a location are all resolvable from the
+ * environment.
+ *
+ * Known limitation: hosts whose only credential source is the GCE metadata
+ * server (GCE/Cloud Run with an attached service account and no local ADC
+ * file) report `false` — probing metadata requires a network call, which has
+ * no place in provider-chain admission. Set GOOGLE_CLOUD_ACCESS_TOKEN or
+ * GOOGLE_APPLICATION_CREDENTIALS on such hosts to enable the Vertex arm.
+ */
+async function hasVertexAdc(): Promise<boolean> {
+	const hasExplicitToken = !!(Bun.env.GOOGLE_CLOUD_ACCESS_TOKEN || Bun.env.CLOUDSDK_AUTH_ACCESS_TOKEN);
+	const adcPath =
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS ||
+		path.join(os.homedir(), ".config", "gcloud", "application_default_credentials.json");
+	const hasAdcFile = await Bun.file(adcPath).exists();
+	if (!hasExplicitToken && !hasAdcFile) return false;
+	const hasProject = !!(Bun.env.GOOGLE_CLOUD_PROJECT || Bun.env.GCP_PROJECT || Bun.env.GCLOUD_PROJECT);
+	const hasLocation = !!(Bun.env.GOOGLE_VERTEX_LOCATION || Bun.env.GOOGLE_CLOUD_LOCATION || Bun.env.VERTEX_LOCATION);
+	return hasProject && hasLocation;
 }
 
 /** Cloud Code Assist API response types */
@@ -531,6 +556,99 @@ async function callGeminiSearch(
 	return finalizeGeminiSearchResult(await parseGeminiSearchStream(response.body, model), fetchImpl, signal);
 }
 
+/**
+ * One direct Gemini `streamGenerateContent` request, shared by the Developer
+ * API and Vertex AI arms. The arms differ only in URL, auth header, and how
+ * the credential is resolved; request assembly, retry policy, error
+ * classification, SSE parsing, and grounding finalization live here so a
+ * transport fix cannot land in one arm and miss the other.
+ */
+interface GeminiDirectRequest {
+	/** Fully built `:streamGenerateContent?alt=sse` URL. */
+	url: string;
+	/** Arm-specific auth header: `x-goog-api-key`, `cf-aig-authorization`, or `Authorization`. */
+	authHeaders: Record<string, string>;
+	/** Active credential, stripped from upstream error bodies before surfacing. */
+	credential: string;
+	/** Arm label for the fallback error message: "Developer API" or "Vertex AI". */
+	errorLabel: string;
+	model: string;
+	query: string;
+	systemPrompt: string | undefined;
+	maxOutputTokens: number | undefined;
+	temperature: number | undefined;
+	toolParams: GeminiToolParams;
+	fetchImpl: FetchImpl | undefined;
+	signal: AbortSignal | undefined;
+	timeoutMs: number | undefined;
+}
+
+async function callGeminiDirectSearch(request: GeminiDirectRequest): Promise<GeminiSearchResult> {
+	const normalizedSystemPrompt = request.systemPrompt?.toWellFormed();
+	const requestBody: Record<string, unknown> = {
+		contents: [
+			{
+				role: "user",
+				parts: [{ text: request.query }],
+			},
+		],
+		tools: buildGeminiRequestTools(request.toolParams),
+		...(normalizedSystemPrompt && {
+			systemInstruction: {
+				parts: [{ text: normalizedSystemPrompt }],
+			},
+		}),
+	};
+
+	if (request.maxOutputTokens !== undefined || request.temperature !== undefined) {
+		const generationConfig: Record<string, number> = {};
+		if (request.maxOutputTokens !== undefined) {
+			generationConfig.maxOutputTokens = request.maxOutputTokens;
+		}
+		if (request.temperature !== undefined) {
+			generationConfig.temperature = request.temperature;
+		}
+		requestBody.generationConfig = generationConfig;
+	}
+
+	const response = await fetchWithRetry(() => request.url, {
+		method: "POST",
+		headers: {
+			...request.authHeaders,
+			"Content-Type": "application/json",
+			Accept: "text/event-stream",
+		},
+		body: JSON.stringify(requestBody),
+		signal: withHardTimeout(request.signal, request.timeoutMs),
+		fetch: request.fetchImpl,
+		maxAttempts: MAX_RETRIES + 1,
+		defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+		maxDelayMs: RATE_LIMIT_BUDGET_MS,
+	});
+
+	if (!response.ok) {
+		const rawErrorText = await response.text();
+		const errorText = request.credential ? rawErrorText.split(request.credential).join("[redacted]") : rawErrorText;
+		const classified = classifyProviderHttpError("gemini", response.status, errorText);
+		if (classified) throw classified;
+		throw new SearchProviderError(
+			"gemini",
+			`Gemini ${request.errorLabel} error (${response.status}): ${errorText}`,
+			response.status,
+		);
+	}
+
+	if (!response.body) {
+		throw new SearchProviderError("gemini", "Gemini API returned no response body", 500);
+	}
+
+	return finalizeGeminiSearchResult(
+		await parseGeminiSearchStream(response.body, request.model),
+		request.fetchImpl,
+		request.signal,
+	);
+}
+
 async function callGeminiDeveloperSearch(
 	apiKey: string,
 	endpoint: GeminiDeveloperEndpoint,
@@ -544,67 +662,64 @@ async function callGeminiDeveloperSearch(
 	signal: AbortSignal | undefined,
 	timeoutMs: number | undefined,
 ): Promise<GeminiSearchResult> {
-	const normalizedSystemPrompt = systemPrompt?.toWellFormed();
-	const requestBody: Record<string, unknown> = {
-		contents: [
-			{
-				role: "user",
-				parts: [{ text: query }],
-			},
-		],
-		tools: buildGeminiRequestTools(toolParams),
-		...(normalizedSystemPrompt && {
-			systemInstruction: {
-				parts: [{ text: normalizedSystemPrompt }],
-			},
-		}),
-	};
-
-	if (maxOutputTokens !== undefined || temperature !== undefined) {
-		const generationConfig: Record<string, number> = {};
-		if (maxOutputTokens !== undefined) {
-			generationConfig.maxOutputTokens = maxOutputTokens;
-		}
-		if (temperature !== undefined) {
-			generationConfig.temperature = temperature;
-		}
-		requestBody.generationConfig = generationConfig;
-	}
-
-	const response = await fetchWithRetry(() => `${endpoint.url}/models/${model}:streamGenerateContent?alt=sse`, {
-		method: "POST",
-		headers: {
-			...(endpoint.isCloudflareGateway
-				? { "cf-aig-authorization": `Bearer ${apiKey}` }
-				: { "x-goog-api-key": apiKey }),
-			"Content-Type": "application/json",
-			Accept: "text/event-stream",
-		},
-		body: JSON.stringify(requestBody),
-		signal: withHardTimeout(signal, timeoutMs),
-		fetch: fetchImpl,
-		maxAttempts: MAX_RETRIES + 1,
-		defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-		maxDelayMs: RATE_LIMIT_BUDGET_MS,
+	return callGeminiDirectSearch({
+		url: `${endpoint.url}/models/${model}:streamGenerateContent?alt=sse`,
+		authHeaders: endpoint.isCloudflareGateway
+			? { "cf-aig-authorization": `Bearer ${apiKey}` }
+			: { "x-goog-api-key": apiKey },
+		credential: apiKey,
+		errorLabel: "Developer API",
+		model,
+		query,
+		systemPrompt,
+		maxOutputTokens,
+		temperature,
+		toolParams,
+		fetchImpl,
+		signal,
+		timeoutMs,
 	});
+}
 
-	if (!response.ok) {
-		const rawErrorText = await response.text();
-		const errorText = apiKey ? rawErrorText.split(apiKey).join("[redacted]") : rawErrorText;
-		const classified = classifyProviderHttpError("gemini", response.status, errorText);
-		if (classified) throw classified;
+async function callGeminiVertexSearch(
+	model: string,
+	query: string,
+	systemPrompt: string | undefined,
+	maxOutputTokens: number | undefined,
+	temperature: number | undefined,
+	toolParams: GeminiToolParams,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs: number | undefined,
+): Promise<GeminiSearchResult> {
+	const project = resolveProject();
+	const location = resolveLocation();
+	let accessToken: string;
+	try {
+		accessToken = await getVertexAccessToken({ signal: withHardTimeout(signal, timeoutMs), fetch: fetchImpl });
+	} catch (error) {
 		throw new SearchProviderError(
 			"gemini",
-			`Gemini Developer API error (${response.status}): ${errorText}`,
-			response.status,
+			`Gemini Vertex AI auth failed: ${error instanceof Error ? error.message : String(error)}`,
+			401,
 		);
 	}
-
-	if (!response.body) {
-		throw new SearchProviderError("gemini", "Gemini API returned no response body", 500);
-	}
-
-	return finalizeGeminiSearchResult(await parseGeminiSearchStream(response.body, model), fetchImpl, signal);
+	const host = resolveVertexEndpointHost(location);
+	return callGeminiDirectSearch({
+		url: `https://${host}/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:streamGenerateContent?alt=sse`,
+		authHeaders: { Authorization: `Bearer ${accessToken}` },
+		credential: accessToken,
+		errorLabel: "Vertex AI",
+		model,
+		query,
+		systemPrompt,
+		maxOutputTokens,
+		temperature,
+		toolParams,
+		fetchImpl,
+		signal,
+		timeoutMs,
+	});
 }
 
 /**
@@ -655,34 +770,65 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
 		);
 	} else {
-		const endpoint = resolveGeminiDeveloperEndpoint();
-		const apiKey = await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
-			signal: params.signal,
-		});
-		if (!apiKey) {
+		// A malformed GOOGLE_GEMINI_BASE_URL disables only the Developer arm;
+		// defer the error so Vertex ADC stays reachable, matching how
+		// isAvailable() admits the provider in that configuration.
+		let endpoint: GeminiDeveloperEndpoint | undefined;
+		let endpointError: unknown;
+		try {
+			endpoint = resolveGeminiDeveloperEndpoint();
+		} catch (error) {
+			endpointError = error;
+		}
+		const apiKey = endpoint
+			? await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
+					signal: params.signal,
+				})
+			: undefined;
+		if (endpoint && apiKey) {
+			result = await callGeminiDeveloperSearch(
+				apiKey,
+				endpoint,
+				selectedModel,
+				searchQuery,
+				params.system_prompt,
+				params.max_output_tokens,
+				params.temperature,
+				{
+					google_search: params.google_search,
+					code_execution: params.code_execution,
+					url_context: params.url_context,
+				},
+				params.fetch,
+				params.signal,
+				params.timeoutMs,
+			);
+		} else if (await hasVertexAdc()) {
+			result = await callGeminiVertexSearch(
+				selectedModel,
+				searchQuery,
+				params.system_prompt,
+				params.max_output_tokens,
+				params.temperature,
+				{
+					google_search: params.google_search,
+					code_execution: params.code_execution,
+					url_context: params.url_context,
+				},
+				params.fetch,
+				params.signal,
+				params.timeoutMs,
+			);
+		} else if (endpoint) {
 			throw new Error(
 				endpoint.isCloudflareGateway
 					? 'No Cloudflare AI Gateway credential found. Configure provider "cloudflare-ai-gateway" or set CLOUDFLARE_AI_GATEWAY_API_KEY.'
-					: "No Gemini credentials found. Set GEMINI_API_KEY, configure an API key for provider \"google\", or login with 'omp /login google-gemini-cli' / 'omp /login google-antigravity' to enable Gemini web search.",
+					: "No Gemini credentials found. Set GEMINI_API_KEY, configure an API key for provider \"google\", login with 'omp /login google-gemini-cli' / 'omp /login google-antigravity', or configure Vertex AI ADC (GOOGLE_APPLICATION_CREDENTIALS plus GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION) to enable Gemini web search.",
 			);
+		} else {
+			// Misconfigured GOOGLE_GEMINI_BASE_URL and no other arm can serve.
+			throw endpointError;
 		}
-		result = await callGeminiDeveloperSearch(
-			apiKey,
-			endpoint,
-			selectedModel,
-			searchQuery,
-			params.system_prompt,
-			params.max_output_tokens,
-			params.temperature,
-			{
-				google_search: params.google_search,
-				code_execution: params.code_execution,
-				url_context: params.url_context,
-			},
-			params.fetch,
-			params.signal,
-			params.timeoutMs,
-		);
 	}
 
 	let sources = result.sources;
@@ -707,16 +853,17 @@ export class GeminiProvider extends SearchProvider {
 	readonly id = "gemini";
 	readonly label = "Gemini";
 
-	isAvailable(authStorage: AuthStorage): boolean {
+	async isAvailable(authStorage: AuthStorage): Promise<boolean> {
 		// Cheap, in-memory check — avoids driving the refresh pipeline during
 		// the provider-chain probe. `searchGemini` refreshes OAuth lazily on the
 		// actual request and resolves developer API keys through AuthStorage.
 		if (hasGeminiOAuth(authStorage)) return true;
 		try {
-			return authStorage.hasAuth(resolveGeminiDeveloperEndpoint().authProvider);
+			if (authStorage.hasAuth(resolveGeminiDeveloperEndpoint().authProvider)) return true;
 		} catch {
-			return false;
+			// A malformed Developer API endpoint does not preclude Vertex.
 		}
+		return await hasVertexAdc();
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
