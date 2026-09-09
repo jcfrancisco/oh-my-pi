@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Unset `advisor` model roles now honor the configured `@slow` fallback in direct execution and the `/models` Roles view.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

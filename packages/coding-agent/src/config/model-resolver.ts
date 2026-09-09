@@ -1138,13 +1138,13 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 
 /**
  * Roles that have no priority.json chain of their own reuse another role's
- * list. The advisor — a second-opinion reviewer — defaults to the `slow`
- * reasoning chain, but (unlike the `slow` role, see
- * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
- * model, so it stays a distinct strong model out of the box. The `tiny` role —
- * the override for online title/memory/classifier tasks — reuses the `smol`
- * fast chain so an unset tiny role auto-resolves to the same fast model smol
- * would pick.
+ * list. The advisor — a second-opinion reviewer — honors the configured `slow`
+ * role when set (see {@link ROLE_CONFIGURED_FALLBACK}) and otherwise defaults
+ * to the built-in `slow` reasoning chain; it never inherits the primary's
+ * model (see {@link shouldInheritDefaultBeforePriority}), so it stays a
+ * distinct strong model out of the box. The `tiny` role — the override for
+ * online title/memory/classifier tasks — reuses the `smol` fast chain so an
+ * unset tiny role auto-resolves to the same fast model smol would pick.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
@@ -1153,6 +1153,7 @@ const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> =
 
 const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ModelRole>> = {
 	tiny: "smol",
+	advisor: "slow",
 };
 
 /** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */

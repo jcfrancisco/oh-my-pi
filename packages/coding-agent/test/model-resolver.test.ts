@@ -1138,6 +1138,17 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
 	});
 
+	test("uses configured slow for unconfigured advisor before priority defaults", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				slow: "baseten/custom-slow:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
+	});
+
 	test("breaks the tiny/smol fallback cycle via a default alias", () => {
 		const settings = Settings.isolated({ modelRoles: { default: "@tiny" } });
 		const baseline = resolveAgentModelPatterns({ agentModel: "@smol", settings: Settings.isolated() });
